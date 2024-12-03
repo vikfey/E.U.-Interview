@@ -1,0 +1,205 @@
+#Library
+library(lmtest)
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(broom)
+library(ggplot2)
+library(multcomp)
+library(psych)
+
+# Load and prepare data --------------------------------------------------------
+data_xlsx <- read_excel("dataset-cleaned.xlsx")
+data_xlsx <- data_xlsx[-c(22, 145, 73), ]
+data_xlsx <- type.convert(data_xlsx, as.is = TRUE)
+df <- subset(data_xlsx, select = -c(Selection_1, Selection_2, 
+                                    IUIPC_mean, Intention_of_use))
+df <- df %>% 
+  mutate(VDS_difference=VDS_before-VDS_after)
+
+df$Education <- as.factor(df$Education)
+df$n_Education <- unclass(df$Education)
+
+# Data Exploration and Descriptives --------------------------------------------
+
+is.na(df)
+boxplot(df$VDS_before)
+boxplot(df$VDS_after)
+boxplot(df$VDS_difference)
+
+
+# Transform into long data 
+data_long <- df %>%
+  gather(key = "Time", value = "VDS", 
+         VDS_before, VDS_after)
+
+# Sort levels of Time
+data_long$Time <- factor(data_long$Time, levels=c("VDS_before", "VDS_after"))
+
+
+summary <- df %>% 
+  group_by(Groups) %>%  
+  get_summary_stats(VDS_difference, Age, Knowledge_score,  type="common")
+as.data.frame(summary)
+
+freq_table1a <- table(df$Groups, df$Gender)
+ftable(freq_table1a)
+
+frequ_table1b <- table(df$Groups, df$Education)
+ftable(frequ_table1b)
+
+# Visuals ----------------------------------------------------------------------
+ggplot(data_long, aes(x = Time, y = VDS, 
+                      shape = as.factor(Groups),
+                      group = as.factor(Groups),
+                      color = as.factor(Groups))) +
+  stat_summary(fun = "mean", geom = "point", size = 3) +
+  stat_summary(fun = "mean", geom = "line",  linewidth = .8) +
+  stat_summary(fun.data = "mean_se", geom = "errorbar", width = .1) +
+  scale_color_manual(values = c("blue", "darkorange", "darkgreen")) +
+  expand_limits(y=0) +                        # Expand y range
+  scale_y_continuous(limits=c(0,0.5), expand=c(0,0), breaks=seq(0, 0.5, 0.1)) +
+  theme_classic()
+
+# Boxplot
+bxp <- ggboxplot(df, x = "Groups", y = "VDS_difference", 
+                 ylab = "VDS_difference", 
+                 add = "mean_se",
+                 color = "Groups", palette = c("blue","darkorange","darkgreen"),
+                 size = .7,
+                 ylim = c(-1, 1)) + 
+  scale_y_continuous(expand = c(0,0), breaks = seq(-1, 1, .5))
+bxp
+
+# Violin Plot
+vio <- ggviolin(
+  df, x = "Groups", y = "VDS_difference",
+  fill = "Groups", palette = c("blue","darkorange", "darkgreen"),
+  xlab = "Groups", ylab = "VDS_difference", 
+  add = c("mean_se", "boxplot"), size = .7,
+  ylim = c(-1,1)) +
+  scale_y_continuous(expand = c(0, 0) ,breaks = seq(-1, 1, 0.2)) +
+  theme(axis.title.x = element_text(size=13.5)) +
+  theme(axis.text.x = element_text(size=13.5)) + 
+  theme(axis.title.y = element_text(size=13.5))
+theme(axis.text.y = element_text(size=13.5))
+vio
+
+
+# Multiple linear regression ---------------------------------------------------
+# Dummy coding 
+
+dummies_g <- dummy.code(df$Groups)
+colnames(dummies_g) <- c("DG1", "DG3", "DG2")
+df <- cbind(df, dummies_g)
+df$Groups <- as.factor(df$Groups)
+
+dummies_e <- dummy.code(df$Education)
+colnames(dummies_e) <- c("Dhigh", "Dlower", "Dother")
+df <- cbind(df, dummies_e)
+df$Education <- as.factor(df$Education)
+
+dummies_ge <- dummy.code(df$Gender)
+colnames(dummies_ge) <- c("DGe2", "DGe1")
+df <- cbind(df, dummies_ge)
+df$Gender <- as.factor(df$Gender)
+
+
+# Parameters for regression output
+
+mlr <- lm(VDS_difference ~ DG2 + DG3 + Knowledge_score + Age + 
+            DGe2 + Dlower + Dother, data = df)
+summary(mlr)
+
+summ(mlr, digits = 3)
+
+mlr_b <- lm(VDS_difference ~ DG1 + DG2 + Knowledge_score + Age + 
+             DGe2 + Dlower + Dother, data = df)
+summary(mlr_b)
+summ(mlr_b, digits = 3)
+
+mlr_c <- lm(VDS_difference ~ DG2 + DG3 + Knowledge_score + Age +  
+              DGe2 + Dhigh + Dother, data = df)
+summary(mlr_c)
+
+
+# Data for the linearity check
+
+attach(df)
+data.plot <- data.frame(VDS_difference, Knowledge_score, Age)
+detach(df)
+
+
+# Regression Assumptions--------------------------------------------------------
+library(jtools)
+
+# Homoscedasticity - maybe violated
+
+# 1 Visuals (goal: chaotic cloud; problematic if funnel shape)
+plot(mlr, 1)
+
+plot(fitted.values(mlr), rstandard(mlr))
+
+# 2 Breusch Pagan Test - Significance test for heteroscedasticity
+# (here non-sig. indicating homoscedasticity)
+bptest(mlr) 
+
+# Use of heteroskedasticic robust estimators (HC4 in cases optimal when 
+# normal distribution of residuals violated and high leverage outliers)
+library(sandwich)
+coeftest(mlr, vcov = vcovHC(mlr, type = "HC4"))
+
+
+# Normal distribution of residuals - violated
+
+# 1 Histogram of residuals (goal is normal distribution; here very sharp)
+hist(residuals(mlr))
+
+# 2 Q-Q plot (goal are points near/on line; here on line except margins, no 45°)
+qqnorm(residuals(mlr))
+qqline(residuals(mlr))
+
+# 3 Shapiro-Wilk test for normality 
+# (goal is non-sig.; here sig. = non-normal, however very sensitive)
+shapiro.test(mlr$residuals)
+
+# Linearity
+
+# 1 Pairwise scatterplots
+# (scatterplots with criterion variable relevant)
+pairs(data.plot, pch = 19, lower.panel = NULL)
+
+# 2 Rainbow test (significant equals nonlinearity) - transformation needed
+raintest(mlr)
+
+
+# Autocorrelation 
+
+# Absence of strong multicollinearity - no strong multicollinearity
+subset_cor <- subset(df, select = c(Groups, Knowledge_score, 
+                                    Age, n_Education, Gender))
+
+subset_cor$Groups <- as.numeric(df$Groups)
+subset_cor$n_Education <- as.numeric(df$n_Education)
+subset_cor$Gender <- as.numeric(df$Gender)
+
+corr_tab <- cor(subset_cor, method = "pearson")
+corr_tab
+
+
+# Variance inflation factor (problematic are VIF values above 10.0) - no values above 10
+car::vif(mlr)
+
+# Independent/uncorrelated residuals
+dwtest(mlr)
+
+# Outliers
+
+# Cook's distance
+# (different cut-off values; threshold here of 4/N is very conservative)
+plot(mlr, 4)
+cd <- cooks.distance(mlr)
+View(cd<4/227)
+
